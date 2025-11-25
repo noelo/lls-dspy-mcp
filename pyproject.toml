@@ -8,4 +8,5 @@ dependencies = [
     "dotenv>=0.9.9",
     "dspy>=3.0.4",
     "llama-stack-client>=0.3.2",
+    "mcp>=1.22.0",
 ]

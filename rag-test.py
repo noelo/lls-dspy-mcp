@@ -1,16 +1,15 @@
 # oc port-forward -n skills svc/llama-stack-service 8321
-
-import uuid
+from typing import TYPE_CHECKING, Any
 from llama_stack_client import RAGDocument, LlamaStackClient, types
+from llama_stack_client.types import ToolInvocationResult
 from termcolor import cprint
-import sys
 import requests
 from io import BytesIO
 import dspy
 from dspy.utils.mcp import convert_input_schema_to_tool_args
 import asyncio
 from llama_stack_client import AsyncLlamaStackClient
-
+from mcp.types import TextContent
 
 def dump_api(client):
     models = client.models.list()
@@ -146,38 +145,48 @@ class QA(dspy.Signature):
     # outputs: dspy.ToolCalls = dspy.OutputField()
 
 
-def weather(city: str) -> str:
+def local_weather(city: str) -> str:
+    print(f"Executing local tool local_weather({city})")
     return "it is currently raining"
 
 
-def timeofday(city: str) -> str:
+def local_timeofday(city: str) -> str:
+    print(f"Executing local tool local_timeofday({city})")
     return "the current time is 21:00"
-
-
-tools = {"weather": dspy.Tool(weather), "timeofday": dspy.Tool(timeofday)}
-
-tool_list = [dspy.Tool(weather), dspy.Tool(timeofday)]
 
 
 async def execute_dspy(predict: dspy.ReAct, user_request: str):
     history = dspy.History(messages=[])
     result = await predict.acall(question=user_request, history=history)
     print(result)
-    dspy.inspect_history(n=50)
+    dspy.inspect_history(n=50)    
 
+def convert_lls_mcp_tool_result(call_tool_result: ToolInvocationResult) -> str | list[Any]:
+    text_contents: list[TextContent] = []
+    non_text_contents = []
+    for content in call_tool_result.content or []:
+        if isinstance(content, TextContent):
+            text_contents.append(content)
+        else:
+            non_text_contents.append(content)
 
-def lls_mcp_to_dspy(t: types.ToolDef, client: AsyncLlamaStackClient):
+    tool_content = [content.text for content in text_contents]
+    if len(text_contents) == 1:
+        tool_content = tool_content[0]
+
+    if call_tool_result.error_code !=0:
+        raise RuntimeError(f"Failed to call a MCP tool: {call_tool_result.error_code}:{call_tool_result.error_message}")
+
+    return tool_content or non_text_contents
+
+def lls_mcp_to_dspy_tool(t: types.ToolDef, client: AsyncLlamaStackClient):
     args, arg_types, arg_desc = convert_input_schema_to_tool_args(t.input_schema)
 
-    # Convert the MCP tool and Session to a single async method
+    # Convert the MCP tool to a single async method
     async def func(*args, **kwargs):
-        print(f"Executing {t.name}")
+        print(f"Executing {t.name}::{kwargs}")
         result = await client.tool_runtime.invoke_tool(tool_name=t.name,kwargs=kwargs)
-        
-        print(f"HEREREERERERERERERERERE {result}")
-
-        # return _convert_mcp_tool_result(result)
-        return result
+        return convert_lls_mcp_tool_result(result)
 
     return dspy.Tool(
         func=func,
@@ -189,7 +198,7 @@ def lls_mcp_to_dspy(t: types.ToolDef, client: AsyncLlamaStackClient):
     )
 
 
-async def main(lls_client) -> None:
+async def main(lls_client,existing_tools) -> None:
     toolr = await lls_client.tool_runtime.list_tools()
     for t in toolr:
         print(f"Tool runtimes {t}\n")
@@ -205,44 +214,25 @@ async def main(lls_client) -> None:
     LOGGING_DATETIME_FORMAT = "%Y/%m/%d %H:%M:%S"
     dspy.configure(lm=llm)
     tools = await lls_client.tools.list()
-    dspy_tools = []
     for t in tools:
         if "mcp::" in t.toolgroup_id:
-            dspy_tools.append(lls_mcp_to_dspy(t, lls_client))
+            existing_tools.append(lls_mcp_to_dspy_tool(t, lls_client))
 
-    predict = dspy.ReAct(QA, dspy_tools)
-    await execute_dspy(predict=predict, user_request="what skills are available ?")
+    predict = dspy.ReAct(QA, tools=existing_tools)
+    await execute_dspy(predict=predict, user_request="I live in Sydney. How would I create a red hat branded marketing website that shows the current time and weather")
     
     dspy.inspect_history()
 
 
 if __name__ == "__main__":
+
+    tool_list = [dspy.Tool(local_weather), dspy.Tool(local_timeofday)]
+
     base_url = "http://localhost:8321"
 
     lls_client = AsyncLlamaStackClient(base_url=base_url)
 
-
     # dump_api(lls_client)
 
-    asyncio.run(main(lls_client))
-    
-    #     execute_dspy(predict=predict, user_request="what skills are available ?")
-    # )
-    # while True:
-    #     question = input("Type your question, end conversation by typing 'finish': ")
-    #     if question == "finish":
-    #         break
-    #     response = await predict.acall(question=question, history=history,tools=tools)
-    #     print(f"\n{response.answer} {response.outputs}\n")
-    #     # history.messages.append({"question": question, **response})
-    #     # result = None
-    #     # for call in response.outputs.tool_calls:
-    #     #     # Execute the tool call
-    #     #     result = call.execute()
-    #     #     # For versions earlier than 3.0.4b2, use: result = tools[call.name](**call.args)
-    #     #     print(f"Tool: {call.name}")
-    #     #     print(f"Args: {call.args}")
-    #     #     print(f"Result: {result}")
-    #     history.messages.append({"question": question, **response})
-
+    asyncio.run(main(lls_client,tool_list))
 
